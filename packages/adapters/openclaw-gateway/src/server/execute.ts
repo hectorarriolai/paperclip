@@ -1136,7 +1136,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     idempotencyKey: ctx.runId,
   };
   delete agentParams.text;
-  agentParams.paperclip = paperclipPayload;
+  // NOTE: The structured paperclip payload is NOT sent as an agent param because
+  // the OpenClaw gateway rejects unknown properties. The wake context is already
+  // embedded in the message text via buildWakeText(). The paperclipPayload is
+  // kept for use by extractRuntimeServicesFromMeta() on the response side.
+  delete agentParams.paperclip;
 
   const configuredAgentId = nonEmpty(ctx.config.agentId);
   if (configuredAgentId && !nonEmpty(agentParams.agentId)) {
