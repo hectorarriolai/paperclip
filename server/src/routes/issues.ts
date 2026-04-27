@@ -101,6 +101,44 @@ import { parseIssueExecutionWorkspaceSettings } from "../services/execution-work
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
+
+// ---------------------------------------------------------------------------
+// Due-date scheduler: defers agent wakeups until dueAt arrives
+// ---------------------------------------------------------------------------
+const pendingDueWakeups = new Map<string, NodeJS.Timeout>();
+
+function scheduleDueWakeup(
+  issueId: string,
+  agentId: string,
+  dueAt: Date,
+  heartbeat: { wakeup: (agentId: string, opts: any) => Promise<unknown> },
+  opts: any,
+) {
+  cancelDueWakeup(issueId);
+  const delayMs = Math.max(0, dueAt.getTime() - Date.now());
+  const timer = setTimeout(() => {
+    pendingDueWakeups.delete(issueId);
+    void heartbeat
+      .wakeup(agentId, opts)
+      .catch((err) => logger.warn({ err, issueId }, "failed scheduled due-date wakeup"));
+  }, delayMs);
+  timer.unref();
+  pendingDueWakeups.set(issueId, timer);
+  logger.info({ issueId, agentId, dueAt: dueAt.toISOString(), delayMs }, "scheduled due-date wakeup");
+}
+
+function cancelDueWakeup(issueId: string) {
+  const existing = pendingDueWakeups.get(issueId);
+  if (existing) {
+    clearTimeout(existing);
+    pendingDueWakeups.delete(issueId);
+  }
+}
+
+function isDueDateInFuture(dueAt: Date | null | undefined): dueAt is Date {
+  return !!dueAt && dueAt.getTime() > Date.now();
+}
+
 const updateIssueRouteSchema = updateIssueSchema.extend({
   interrupt: z.boolean().optional(),
 });
@@ -2361,15 +2399,26 @@ export function issueRoutes(
       });
     }
 
-    void queueIssueAssignmentWakeup({
-      heartbeat,
-      issue,
-      reason: "issue_assigned",
-      mutation: "create",
-      contextSource: "issue.create",
-      requestedByActorType: actor.actorType,
-      requestedByActorId: actor.actorId,
-    });
+    if (isDueDateInFuture(issue.dueAt) && issue.assigneeAgentId) {
+      scheduleDueWakeup(issue.id, issue.assigneeAgentId, issue.dueAt, heartbeat, {
+        source: "assignment",
+        triggerDetail: "system",
+        reason: "issue_assigned",
+        payload: { issueId: issue.id, mutation: "create" },
+        requestedByActorType: actor.actorType,
+        requestedByActorId: actor.actorId,
+      });
+    } else {
+      void queueIssueAssignmentWakeup({
+        heartbeat,
+        issue,
+        reason: "issue_assigned",
+        mutation: "create",
+        contextSource: "issue.create",
+        requestedByActorType: actor.actorType,
+        requestedByActorId: actor.actorId,
+      });
+    }
 
     res.status(201).json({
       ...issue,
