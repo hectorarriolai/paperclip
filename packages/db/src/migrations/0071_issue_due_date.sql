@@ -1,1 +1,1 @@
-ALTER TABLE "issues" ADD COLUMN "due_at" timestamp with time zone;
+ALTER TABLE "issues" ADD COLUMN IF NOT EXISTS "due_at" timestamp with time zone;
