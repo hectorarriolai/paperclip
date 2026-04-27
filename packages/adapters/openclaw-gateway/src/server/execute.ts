@@ -1117,10 +1117,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   const sessionKeyStrategy = normalizeSessionKeyStrategy(ctx.config.sessionKeyStrategy);
   const configuredSessionKey = nonEmpty(ctx.config.sessionKey);
+  // Fallback to payloadTemplate.agentId so the session key gets a proper
+  // `agent:<id>:` prefix even when agentId is set via the payloadTemplate
+  // rather than top-level config. Without this, multi-agent setups all
+  // collide on agent "main" and OpenClaw rejects requests with
+  // 'agent X does not match session key agent "main"'.
+  const sessionKeyAgentId =
+    nonEmpty(ctx.config.agentId) ?? (nonEmpty(payloadTemplate.agentId as string) as string | null);
   const sessionKey = resolveSessionKey({
     strategy: sessionKeyStrategy,
     configuredSessionKey,
-    agentId: nonEmpty(ctx.config.agentId),
+    agentId: sessionKeyAgentId,
     runId: ctx.runId,
     issueId: wakePayload.issueId,
   });
