@@ -362,8 +362,8 @@ function buildWakeText(
   payload: WakePayload,
   paperclipEnv: Record<string, string>,
   structuredWakePrompt: string,
+  claimedApiKeyPath: string,
 ): string {
-  const claimedApiKeyPath = "~/.openclaw/workspace/paperclip-claimed-api-key.json";
   const orderedKeys = [
     "PAPERCLIP_RUN_ID",
     "PAPERCLIP_AGENT_ID",
@@ -1107,12 +1107,25 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const paperclipEnv = buildPaperclipEnvForWake(ctx, wakePayload);
   const structuredWakePrompt = renderPaperclipWakePrompt(ctx.context.paperclipWake);
   const structuredWakeJson = stringifyPaperclipWakePayload(ctx.context.paperclipWake);
+  // Resolve a per-agent claimed API key path so each OpenClaw agent reads/writes
+  // its OWN key file. Default upstream uses a single shared file which causes
+  // agents to overwrite each other's keys; symptom: comments posted by agent X
+  // are credited to whoever last claimed (often Saski/main), creating wake loops.
+  // Override priority: explicit ctx.config.claimedApiKeyPath > per-agent default.
+  const gatewayAgentIdForKeyPath =
+    nonEmpty(ctx.config.agentId) ?? (nonEmpty((parseObject(ctx.config.payloadTemplate) as { agentId?: string }).agentId as string) as string | null);
+  const claimedApiKeyPath =
+    nonEmpty(ctx.config.claimedApiKeyPath) ??
+    (gatewayAgentIdForKeyPath
+      ? `~/.openclaw/workspace/paperclip-claimed-api-key-${gatewayAgentIdForKeyPath}.json`
+      : "~/.openclaw/workspace/paperclip-claimed-api-key.json");
   const wakeText = buildWakeText(
     wakePayload,
     paperclipEnv,
     structuredWakeJson
       ? joinWakePayloadSections(structuredWakePrompt, structuredWakeJson)
       : structuredWakePrompt,
+    claimedApiKeyPath,
   );
 
   const sessionKeyStrategy = normalizeSessionKeyStrategy(ctx.config.sessionKeyStrategy);
