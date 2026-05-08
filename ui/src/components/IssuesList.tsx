@@ -1379,6 +1379,18 @@ export function IssuesList({
                                 </span>
                               )
                             ) : null}
+                            {issue.dueAt && (
+                              <span className={cn(
+                                "ml-1.5 text-[11px] font-medium shrink-0",
+                                new Date(issue.dueAt) < new Date() && !["done", "cancelled"].includes(issue.status)
+                                  ? "text-red-500"
+                                  : "text-muted-foreground",
+                              )}>
+                                {new Date(issue.dueAt) < new Date() && !["done", "cancelled"].includes(issue.status)
+                                  ? "Overdue"
+                                  : `Due ${new Date(issue.dueAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}`}
+                              </span>
+                            )}
                           </>
                         )}
                         className={isMutedIssue ? "opacity-70" : undefined}
