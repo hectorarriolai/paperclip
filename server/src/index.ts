@@ -668,11 +668,30 @@ export async function startServer(): Promise<StartedServer> {
     .catch((err) => {
       logger.error({ err }, "startup reconciliation of persisted runtime services failed");
     });
-  
+
+  const heartbeat = heartbeatService(db as any, { pluginWorkerManager });
+
+  if (!config.heartbeatSchedulerEnabled) {
+    // Keep the full scheduler disabled without leaving old running locks behind after a restart.
+    void heartbeat
+      .reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 })
+      .then((result) => {
+        const reaped = result?.reaped ?? 0;
+        if (reaped > 0) {
+          logger.warn(
+            { reaped, runIds: result?.runIds ?? [] },
+            "startup orphaned run reaper cleaned stale runs while heartbeat scheduler is disabled",
+          );
+        }
+      })
+      .catch((err) => {
+        logger.error({ err }, "startup orphaned run reaper failed while heartbeat scheduler is disabled");
+      });
+  }
+
   if (config.heartbeatSchedulerEnabled) {
-    const heartbeat = heartbeatService(db as any, { pluginWorkerManager });
     const routines = routineService(db as any, { pluginWorkerManager });
-  
+
     // Reap orphaned running runs at startup while in-memory execution state is empty,
     // then resume any persisted queued runs that were waiting on the previous process.
     void heartbeat
