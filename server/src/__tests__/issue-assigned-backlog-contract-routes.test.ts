@@ -114,6 +114,7 @@ function makeIssue(input: {
   status?: string;
   parentId?: string | null;
   assigneeAgentId?: string | null;
+  dueAt?: Date | null;
 }) {
   return {
     id: input.id,
@@ -126,6 +127,7 @@ function makeIssue(input: {
     parentId: input.parentId ?? null,
     assigneeAgentId: input.assigneeAgentId ?? null,
     assigneeUserId: null,
+    dueAt: input.dueAt ?? null,
     createdByAgentId: null,
     createdByUserId: "local-board",
     executionWorkspaceId: null,
@@ -154,6 +156,7 @@ describe("assigned backlog creation contract", () => {
         title: String(data.title),
         status: String(data.status),
         assigneeAgentId: data.assigneeAgentId as string | null | undefined,
+        dueAt: data.dueAt as Date | null | undefined,
       }));
     mockIssueService.createChild.mockImplementation(async (_parentId: string, data: Record<string, unknown>) => ({
       issue: makeIssue({
@@ -162,6 +165,7 @@ describe("assigned backlog creation contract", () => {
         status: String(data.status),
         parentId: "parent-1",
         assigneeAgentId: data.assigneeAgentId as string | null | undefined,
+        dueAt: data.dueAt as Date | null | undefined,
       }),
       parentBlockerAdded: Boolean(data.blockParentUntilDone),
     }));
@@ -219,6 +223,34 @@ describe("assigned backlog creation contract", () => {
     );
   });
 
+  it("defers top-level assigned wakeup until a future due date", async () => {
+    const dueAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+
+    const res = await request(await createApp())
+      .post("/api/companies/company-1/issues")
+      .send({
+        title: "Assigned scheduled work",
+        assigneeAgentId,
+        dueAt,
+      });
+
+    expect(res.status).toBe(201);
+    expect(mockIssueService.create).toHaveBeenCalledWith(
+      "company-1",
+      expect.objectContaining({
+        title: "Assigned scheduled work",
+        assigneeAgentId,
+        status: "todo",
+        dueAt: expect.any(Date),
+      }),
+    );
+    expect(res.body).toEqual(expect.objectContaining({
+      assigneeAgentId,
+      status: "todo",
+    }));
+    expect(mockWakeup).not.toHaveBeenCalled();
+  });
+
   it("does not let a parent-blocking assigned child become an unwoken backlog leaf by default", async () => {
     const res = await request(await createApp())
       .post("/api/issues/parent-1/children")
@@ -270,6 +302,37 @@ describe("assigned backlog creation contract", () => {
         payload: expect.objectContaining({ mutation: "create" }),
       }),
     );
+  });
+
+  it("defers assigned child wakeup until a future due date", async () => {
+    const dueAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+
+    const res = await request(await createApp())
+      .post("/api/issues/parent-1/children")
+      .send({
+        title: "Assigned scheduled child",
+        assigneeAgentId,
+        blockParentUntilDone: true,
+        dueAt,
+      });
+
+    expect(res.status).toBe(201);
+    expect(mockIssueService.createChild).toHaveBeenCalledWith(
+      "parent-1",
+      expect.objectContaining({
+        title: "Assigned scheduled child",
+        assigneeAgentId,
+        blockParentUntilDone: true,
+        status: "todo",
+        dueAt: expect.any(Date),
+      }),
+    );
+    expect(res.body).toEqual(expect.objectContaining({
+      assigneeAgentId,
+      parentId: "parent-1",
+      status: "todo",
+    }));
+    expect(mockWakeup).not.toHaveBeenCalled();
   });
 
   it("preserves deliberate assigned backlog as parked work without assignment wakeup", async () => {

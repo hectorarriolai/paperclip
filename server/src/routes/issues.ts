@@ -139,6 +139,44 @@ function isDueDateInFuture(dueAt: Date | null | undefined): dueAt is Date {
   return !!dueAt && dueAt.getTime() > Date.now();
 }
 
+type AssignmentWakeupInput = Parameters<typeof queueIssueAssignmentWakeup>[0];
+type DueDateAssignmentWakeupInput = Omit<AssignmentWakeupInput, "issue"> & {
+  issue: AssignmentWakeupInput["issue"] & { dueAt?: Date | null };
+};
+
+function dueDateAssignmentWakeupOptions(input: DueDateAssignmentWakeupInput) {
+  return {
+    source: "assignment" as const,
+    triggerDetail: "system" as const,
+    reason: input.reason,
+    payload: { issueId: input.issue.id, mutation: input.mutation },
+    requestedByActorType: input.requestedByActorType,
+    requestedByActorId: input.requestedByActorId ?? null,
+    contextSnapshot: { issueId: input.issue.id, source: input.contextSource },
+  };
+}
+
+function queueOrScheduleIssueAssignmentWakeup(input: DueDateAssignmentWakeupInput) {
+  if (!input.issue.assigneeAgentId || input.issue.status === "backlog" || ["done", "cancelled"].includes(input.issue.status)) {
+    cancelDueWakeup(input.issue.id);
+    return;
+  }
+
+  if (isDueDateInFuture(input.issue.dueAt)) {
+    scheduleDueWakeup(
+      input.issue.id,
+      input.issue.assigneeAgentId,
+      input.issue.dueAt,
+      input.heartbeat,
+      dueDateAssignmentWakeupOptions(input),
+    );
+    return;
+  }
+
+  cancelDueWakeup(input.issue.id);
+  return queueIssueAssignmentWakeup(input);
+}
+
 const updateIssueRouteSchema = updateIssueSchema.extend({
   interrupt: z.boolean().optional(),
 });
@@ -2399,26 +2437,15 @@ export function issueRoutes(
       });
     }
 
-    if (isDueDateInFuture(issue.dueAt) && issue.assigneeAgentId) {
-      scheduleDueWakeup(issue.id, issue.assigneeAgentId, issue.dueAt, heartbeat, {
-        source: "assignment",
-        triggerDetail: "system",
-        reason: "issue_assigned",
-        payload: { issueId: issue.id, mutation: "create" },
-        requestedByActorType: actor.actorType,
-        requestedByActorId: actor.actorId,
-      });
-    } else {
-      void queueIssueAssignmentWakeup({
-        heartbeat,
-        issue,
-        reason: "issue_assigned",
-        mutation: "create",
-        contextSource: "issue.create",
-        requestedByActorType: actor.actorType,
-        requestedByActorId: actor.actorId,
-      });
-    }
+    void queueOrScheduleIssueAssignmentWakeup({
+      heartbeat,
+      issue,
+      reason: "issue_assigned",
+      mutation: "create",
+      contextSource: "issue.create",
+      requestedByActorType: actor.actorType,
+      requestedByActorId: actor.actorId,
+    });
 
     res.status(201).json({
       ...issue,
@@ -2500,7 +2527,7 @@ export function issueRoutes(
       });
     }
 
-    void queueIssueAssignmentWakeup({
+    void queueOrScheduleIssueAssignmentWakeup({
       heartbeat,
       issue,
       reason: "issue_assigned",
@@ -3226,6 +3253,41 @@ export function issueRoutes(
       isClosedIssueStatus(existing.status) &&
       issue.status === "todo" &&
       req.body.status !== undefined;
+    const dueAtChanged = req.body.dueAt !== undefined && (existing.dueAt?.getTime() ?? null) !== (issue.dueAt?.getTime() ?? null);
+    const assignmentStatusWakeupChanged =
+      dueAtChanged || assigneeChanged || statusChangedFromBacklog || statusChangedFromBlockedToTodo || statusChangedFromClosedToTodo;
+    const shouldDeferAssignmentStatusWakeupForDueDate = Boolean(
+      assignmentStatusWakeupChanged &&
+      issue.assigneeAgentId &&
+      issue.status !== "backlog" &&
+      !["done", "cancelled"].includes(issue.status) &&
+      isDueDateInFuture(issue.dueAt),
+    );
+
+    if (shouldDeferAssignmentStatusWakeupForDueDate && issue.assigneeAgentId && isDueDateInFuture(issue.dueAt)) {
+      scheduleDueWakeup(issue.id, issue.assigneeAgentId, issue.dueAt, heartbeat, {
+        source: "assignment",
+        triggerDetail: "system",
+        reason: "issue_assigned",
+        payload: {
+          issueId: issue.id,
+          mutation: "update",
+          ...(resumeRequested === true ? { resumeIntent: true, followUpRequested: true } : {}),
+          ...(interruptedRunId ? { interruptedRunId } : {}),
+        },
+        requestedByActorType: actor.actorType,
+        requestedByActorId: actor.actorId,
+        contextSnapshot: {
+          issueId: issue.id,
+          source: "issue.update.due_date",
+          ...(resumeRequested === true ? { resumeIntent: true, followUpRequested: true } : {}),
+          ...(interruptedRunId ? { interruptedRunId } : {}),
+        },
+      });
+    } else if (dueAtChanged || assigneeChanged || existing.status !== issue.status) {
+      cancelDueWakeup(issue.id);
+    }
+
     const previousExecutionState = parseIssueExecutionState(existing.executionState);
     const nextExecutionState = parseIssueExecutionState(issue.executionState);
     const executionStageWakeup = buildExecutionStageWakeup({
@@ -3251,7 +3313,12 @@ export function issueRoutes(
 
       if (executionStageWakeup) {
         addWakeup(executionStageWakeup.agentId, executionStageWakeup.wakeup);
-      } else if (assigneeChanged && issue.assigneeAgentId && issue.status !== "backlog") {
+      } else if (
+        assigneeChanged &&
+        issue.assigneeAgentId &&
+        issue.status !== "backlog" &&
+        !shouldDeferAssignmentStatusWakeupForDueDate
+      ) {
         addWakeup(issue.assigneeAgentId, {
           source: "assignment",
           triggerDetail: "system",
@@ -3283,6 +3350,7 @@ export function issueRoutes(
 
       if (
         !assigneeChanged &&
+        !shouldDeferAssignmentStatusWakeupForDueDate &&
         (statusChangedFromBacklog || statusChangedFromBlockedToTodo || statusChangedFromClosedToTodo) &&
         issue.assigneeAgentId
       ) {
@@ -3802,7 +3870,7 @@ export function issueRoutes(
       }
 
       for (const createdIssue of createdIssues) {
-        void queueIssueAssignmentWakeup({
+        void queueOrScheduleIssueAssignmentWakeup({
           heartbeat,
           issue: createdIssue,
           reason: "issue_assigned",
