@@ -106,6 +106,7 @@ const MAX_ISSUE_COMMENT_LIMIT = 500;
 // Due-date scheduler: defers agent wakeups until dueAt arrives
 // ---------------------------------------------------------------------------
 const pendingDueWakeups = new Map<string, NodeJS.Timeout>();
+let pendingDueWakeupsBootstrapped = false;
 
 function scheduleDueWakeup(
   issueId: string,
@@ -175,6 +176,40 @@ function queueOrScheduleIssueAssignmentWakeup(input: DueDateAssignmentWakeupInpu
 
   cancelDueWakeup(input.issue.id);
   return queueIssueAssignmentWakeup(input);
+}
+
+function bootstrapPendingDueWakeups(input: {
+  svc: {
+    listPendingDueWakeups?: () => Promise<Array<{
+      id: string;
+      assigneeAgentId: string | null;
+      status: string;
+      dueAt: Date | null;
+    }>>;
+  };
+  heartbeat: DueDateAssignmentWakeupInput["heartbeat"];
+}) {
+  if (pendingDueWakeupsBootstrapped || typeof input.svc.listPendingDueWakeups !== "function") return;
+  pendingDueWakeupsBootstrapped = true;
+
+  void input.svc.listPendingDueWakeups()
+    .then((issues) => {
+      for (const issue of issues) {
+        void queueOrScheduleIssueAssignmentWakeup({
+          heartbeat: input.heartbeat,
+          issue,
+          reason: "issue_assigned",
+          mutation: "bootstrap",
+          contextSource: "issue.due_date_bootstrap",
+          requestedByActorType: "system",
+          requestedByActorId: null,
+        });
+      }
+      if (issues.length > 0) {
+        logger.info({ count: issues.length }, "bootstrapped pending due-date wakeups");
+      }
+    })
+    .catch((err) => logger.warn({ err }, "failed to bootstrap pending due-date wakeups"));
 }
 
 const updateIssueRouteSchema = updateIssueSchema.extend({
@@ -850,6 +885,7 @@ export function issueRoutes(
   const heartbeat = heartbeatService(db, {
     pluginWorkerManager: opts.pluginWorkerManager,
   });
+  bootstrapPendingDueWakeups({ svc, heartbeat });
   const feedback = feedbackService(db);
   const companiesSvc = companyService(db);
   let searchSvc = opts.searchService ?? null;

@@ -2429,6 +2429,26 @@ export function issueService(db: Db) {
   return {
     clearExecutionRunIfTerminal,
 
+    listPendingDueWakeups: async () => {
+      return db
+        .select({
+          id: issues.id,
+          assigneeAgentId: issues.assigneeAgentId,
+          status: issues.status,
+          dueAt: issues.dueAt,
+        })
+        .from(issues)
+        .where(
+          and(
+            sql`${issues.assigneeAgentId} is not null`,
+            gt(issues.dueAt, new Date()),
+            notInArray(issues.status, ["backlog", "done", "cancelled"]),
+            isNull(issues.hiddenAt),
+          ),
+        )
+        .orderBy(asc(issues.dueAt), asc(issues.createdAt), asc(issues.id));
+    },
+
     list: async (companyId: string, filters?: IssueFilters) => {
       const conditions = [eq(issues.companyId, companyId)];
       const limit = typeof filters?.limit === "number" && Number.isFinite(filters.limit)
